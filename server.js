@@ -16,6 +16,9 @@ app.use('/api/wallet', walletRoutes)
 const paystackRoutes = require('./routes/paystack')
 app.use('/api/paystack', paystackRoutes)
 
+const billsRoutes = require('./routes/bills')
+app.use('/api/bills', billsRoutes)
+
 // Test route
 app.get('/', (req, res) => {
   res.json({ message: 'Zowpay Backend is running!' })
