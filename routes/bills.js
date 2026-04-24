@@ -283,5 +283,76 @@ router.post('/data/buy', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
+})  // Pay cable TV
+router.post('/cable/pay', async (req, res) => {
+  const { user_id, provider, smart_card_number, plan_id, amount } = req.body
+
+  try {
+    const wallet = await pool.query(
+      'SELECT * FROM wallets WHERE user_id=$1', [user_id]
+    )
+
+    if (!wallet.rows[0] || wallet.rows[0].balance < amount) {
+      return res.status(400).json({ error: 'Insufficient wallet balance' })
+    }
+
+    const reference = 'ZOW-CABLE-' + Date.now()
+
+    const response = await fetch(`${VTPASS_BASE_URL}/pay`, {
+      method: 'POST',
+      headers: {
+        'api-key': VTPASS_API_KEY,
+        'secret-key': VTPASS_SECRET_KEY,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        request_id: reference,
+        serviceID: provider,
+        billersCode: smart_card_number,
+        variation_code: plan_id,
+        amount: amount,
+        phone: '08000000000'
+      })
+    })
+
+    const data = await response.json()
+    console.log('VTPass cable response:', data)
+
+    const success = data.code === '000' ||
+      data?.content?.transactions?.status === 'delivered'
+
+    if (success) {
+      await pool.query(
+        'UPDATE wallets SET balance = balance - $1, updated_at=NOW() WHERE user_id=$2',
+        [amount, user_id]
+      )
+
+      const zowpoints = Math.floor(amount / 100)
+
+      await pool.query(
+        'UPDATE wallets SET zowpoints = zowpoints + $1 WHERE user_id=$2',
+        [zowpoints, user_id]
+      )
+
+      await pool.query(
+        'INSERT INTO transactions (user_id, type, amount, description, reference, status, zowpoints_earned) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+        [user_id, 'cable', amount,
+         `${provider.toUpperCase()} - ${plan_id} - ${smart_card_number}`,
+         reference, 'success', zowpoints]
+      )
+
+      res.json({
+        success: true,
+        message: `${provider.toUpperCase()} subscription activated!`,
+        zowpoints_earned: zowpoints
+      })
+    } else {
+      res.status(400).json({
+        error: data.response_description || 'Payment failed'
+      })
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
 })
 module.exports = router
