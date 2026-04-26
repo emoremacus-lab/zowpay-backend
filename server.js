@@ -18,7 +18,8 @@ app.use('/api/paystack', paystackRoutes)
 
 const billsRoutes = require('./routes/bills')
 app.use('/api/bills', billsRoutes)
-
+const missionsRoutes = require('./routes/missions')
+app.use('/api/missions', missionsRoutes)
 // Test route
 app.get('/', (req, res) => {
   res.json({ message: 'Zowpay Backend is running!' })
