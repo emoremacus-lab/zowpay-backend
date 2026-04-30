@@ -182,7 +182,7 @@ router.post('/electricity/pay', async (req, res) => {
         [amount, user_id]
       )
 
-      const zowpoints = Math.floor(amount / 100)
+      const zowpoints = Math.floor(amount / 20)
 
       await pool.query(
         'UPDATE wallets SET zowpoints = zowpoints + $1 WHERE user_id=$2',

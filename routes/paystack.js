@@ -232,7 +232,7 @@ router.post('/webhook', async (req, res) => {
               [amount, userId]
             )
 
-            const zowpoints = Math.floor(amount / 100)
+            const zowpoints = Math.floor(amount / 200)
 
             await pool.query(
               'UPDATE wallets SET zowpoints = zowpoints + $1 WHERE user_id=$2',
