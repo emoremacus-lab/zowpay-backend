@@ -24,7 +24,8 @@ app.use('/api/missions', missionsRoutes)
 
 const merchantsRoutes = require('./routes/merchants')
 app.use('/api/merchants', merchantsRoutes)
-
+const rewardsRoutes = require('./routes/rewards')
+app.use('/api/rewards', rewardsRoutes)
 // Test route
 app.get('/', (req, res) => {
   res.json({ message: 'Zowpay Backend is running!' })
