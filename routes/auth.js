@@ -58,5 +58,17 @@ router.post('/verify-otp', async (req, res) => {
     res.status(500).json({ error: err.message })
   }
 })
-
+// Update profile
+router.post('/update-profile', async (req, res) => {
+  const { user_id, full_name, email } = req.body
+  try {
+    await pool.query(
+      'UPDATE users SET full_name=$1, email=$2 WHERE id=$3',
+      [full_name, email, user_id]
+    )
+    res.json({ success: true, message: 'Profile updated!' })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
 module.exports = router
