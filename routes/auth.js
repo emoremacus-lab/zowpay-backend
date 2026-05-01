@@ -31,6 +31,15 @@ router.post('/send-otp', async (req, res) => {
     const smsData = await smsResponse.json()
     console.log('Termii response:', smsData)
 
+    res.json({ success: true, message: 'OTP sent' })
+
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+
+
     //
 
 // Verify OTP
