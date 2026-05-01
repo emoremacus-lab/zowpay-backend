@@ -14,14 +14,24 @@ router.post('/send-otp', async (req, res) => {
       [phone, otp, expires]
     )
 
-    // For now we log it — later we'll send via SMS
-    console.log(`OTP for ${phone}: ${otp}`)
+    // Send real SMS via Termii
+    const smsResponse = await fetch('https://api.ng.termii.com/api/sms/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        to: phone,
+        from: 'N-Alert',
+        sms: `Your Zowpay verification code is: ${otp}. Valid for 10 minutes. Do not share this code.`,
+        type: 'plain',
+        api_key: process.env.TERMII_API_KEY,
+        channel: 'dnd'
+      })
+    })
 
-    res.json({ success: true, message: 'OTP sent', otp })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
-})
+    const smsData = await smsResponse.json()
+    console.log('Termii response:', smsData)
+
+    //
 
 // Verify OTP
 router.post('/verify-otp', async (req, res) => {
