@@ -15,18 +15,23 @@ router.post('/send-otp', async (req, res) => {
     )
 
     // Send real SMS via Termii
-    const smsResponse = await fetch('https://api.ng.termii.com/api/sms/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        to: phone,
-        from: 'Zowpay',
-        sms: `Your Zowpay verification code is: ${otp}. Valid for 10 minutes. Do not share this code.`,
-        type: 'plain',
-        api_key: process.env.TERMII_API_KEY,
-        channel: 'generic'
-      })
-    })
+    const smsResponse = await fetch('https://api.ng.termii.com/api/sms/otp/send', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    api_key: process.env.TERMII_API_KEY,
+    message_type: 'NUMERIC',
+    to: phone,
+    from: 'generic',
+    channel: 'generic',
+    pin_attempts: 3,
+    pin_time_to_live: 10,
+    pin_length: 6,
+    pin_placeholder: '< 1234 >',
+    message_text: `Your Zowpay verification code is < 1234 >. Valid for 10 minutes.`,
+    pin_type: 'NUMERIC'
+  })
+})
 
     const smsData = await smsResponse.json()
     console.log('Termii response:', smsData)
