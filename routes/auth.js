@@ -20,11 +20,11 @@ router.post('/send-otp', async (req, res) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         to: phone,
-        from: 'N-Alert',
+        from: 'Zowpay',
         sms: `Your Zowpay verification code is: ${otp}. Valid for 10 minutes. Do not share this code.`,
         type: 'plain',
         api_key: process.env.TERMII_API_KEY,
-        channel: 'dnd'
+        channel: 'generic'
       })
     })
 
