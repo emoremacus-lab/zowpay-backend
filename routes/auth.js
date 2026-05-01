@@ -7,6 +7,7 @@ router.post('/send-otp', async (req, res) => {
   const { phone } = req.body
   try {
     const otp = Math.floor(100000 + Math.random() * 900000).toString()
+    console.log(`OTP for ${phone}: ${otp}`)
     const expires = new Date(Date.now() + 10 * 60 * 1000)
 
     await pool.query(
