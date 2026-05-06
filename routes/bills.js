@@ -71,8 +71,8 @@ router.post('/airtime/buy', async (req, res) => {
         [amount, user_id]
       )
 
-      // Calculate ZowPoints (1 point per ₦10 airtime)
-      const zowpoints = Math.floor(amount / 10)
+      // Calculate ZowPoints (1 point per ₦20 airtime)
+      const zowpoints = Math.floor(amount / 20)
 
       // Add ZowPoints
       await pool.query(
@@ -256,7 +256,7 @@ router.post('/data/buy', async (req, res) => {
         [amount, user_id]
       )
 
-      const zowpoints = Math.floor(amount / 10)
+      const zowpoints = Math.floor(amount / 20)
 
       await pool.query(
         'UPDATE wallets SET zowpoints = zowpoints + $1 WHERE user_id=$2',

@@ -61,8 +61,8 @@ router.post('/verify', async (req, res) => {
       [amount, user_id]
     )
 
-    // Calculate ZowPoints (1 point per ₦100)
-    const zowpoints = Math.floor(amount / 100)
+    // Calculate ZowPoints (1 point per ₦200)
+    const zowpoints = Math.floor(amount / 200)
 
     // Add ZowPoints
     await pool.query(
