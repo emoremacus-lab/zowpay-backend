@@ -348,5 +348,78 @@ router.post('/cable/pay', async (req, res) => {
     res.status(500).json({ error: err.message })
   }
 })
+// Fund betting account
+router.post('/betting/fund', async (req, res) => {
+  const { user_id, provider, customer_id, amount } = req.body
+  try {
+    const wallet = await pool.query(
+      'SELECT * FROM wallets WHERE user_id=$1', [user_id]
+    )
+    if (!wallet.rows[0] || wallet.rows[0].balance < amount) {
+      return res.status(400).json({ error: 'Insufficient wallet balance' })
+    }
 
+    const reference = 'ZOW-BET-' + Date.now()
+
+    const response = await fetch(`${VTPASS_BASE_URL}/pay`, {
+      method: 'POST',
+      headers: {
+        'api-key': VTPASS_API_KEY,
+        'secret-key': VTPASS_SECRET_KEY,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        request_id: reference,
+        serviceID: provider,
+        amount: amount,
+        billersCode: customer_id,
+        phone: '08000000000'
+      })
+    })
+
+    const data = await response.json()
+    console.log('VTPass betting response:', data)
+
+    const success = data.code === '000' ||
+      data?.content?.transactions?.status === 'delivered'
+
+    if (success) {
+      await pool.query(
+        'UPDATE wallets SET balance = balance - $1, updated_at=NOW() WHERE user_id=$2',
+        [amount, user_id]
+      )
+
+      // ₦50 = 1 ZowPoint for betting
+      const zowpoints = Math.floor(amount / 50)
+
+      await pool.query(
+        'UPDATE wallets SET zowpoints = zowpoints + $1 WHERE user_id=$2',
+        [zowpoints, user_id]
+      )
+
+      await pool.query(
+        `INSERT INTO transactions
+         (user_id, type, amount, description, reference, status, zowpoints_earned)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          user_id, 'betting', amount,
+          `${provider} funded - ID: ${customer_id}`,
+          reference, 'success', zowpoints
+        ]
+      )
+
+      res.json({
+        success: true,
+        message: `₦${amount} funded to ${provider} account ${customer_id}!`,
+        zowpoints_earned: zowpoints
+      })
+    } else {
+      res.status(400).json({
+        error: data.response_description || 'Funding failed'
+      })
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
 module.exports = router
