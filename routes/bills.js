@@ -422,4 +422,84 @@ router.post('/betting/fund', async (req, res) => {
     res.status(500).json({ error: err.message })
   }
 })
+// Pay education bills
+router.post('/education/pay', async (req, res) => {
+  const { user_id, provider, variation_code, amount, phone, quantity } = req.body
+  try {
+    const wallet = await pool.query(
+      'SELECT * FROM wallets WHERE user_id=$1', [user_id]
+    )
+    if (!wallet.rows[0] || wallet.rows[0].balance < amount) {
+      return res.status(400).json({ error: 'Insufficient wallet balance' })
+    }
+
+    const reference = 'ZOW-EDU-' + Date.now()
+
+    const response = await fetch(`${VTPASS_BASE_URL}/pay`, {
+      method: 'POST',
+      headers: {
+        'api-key': VTPASS_API_KEY,
+        'secret-key': VTPASS_SECRET_KEY,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        request_id: reference,
+        serviceID: provider,
+        billersCode: phone,
+        variation_code,
+        amount,
+        phone,
+        quantity: quantity || 1
+      })
+    })
+
+    const data = await response.json()
+    console.log('VTPass education response:', data)
+
+    const success = data.code === '000' ||
+      data?.content?.transactions?.status === 'delivered'
+
+    if (success) {
+      await pool.query(
+        'UPDATE wallets SET balance = balance - $1, updated_at=NOW() WHERE user_id=$2',
+        [amount, user_id]
+      )
+
+      // ₦100 = 1 ZowPoint for education
+      const zowpoints = Math.floor(amount / 200)
+
+      await pool.query(
+        'UPDATE wallets SET zowpoints = zowpoints + $1 WHERE user_id=$2',
+        [zowpoints, user_id]
+      )
+
+      await pool.query(
+        `INSERT INTO transactions
+         (user_id, type, amount, description, reference, status, zowpoints_earned)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          user_id, 'education', amount,
+          `${provider.toUpperCase()} - ${variation_code}`,
+          reference, 'success', zowpoints
+        ]
+      )
+
+      const token = data?.content?.transactions?.token ||
+        data?.content?.transactions?.pin || null
+
+      res.json({
+        success: true,
+        message: `${provider.toUpperCase()} payment successful!`,
+        token,
+        zowpoints_earned: zowpoints
+      })
+    } else {
+      res.status(400).json({
+        error: data.response_description || 'Payment failed'
+      })
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
 module.exports = router
