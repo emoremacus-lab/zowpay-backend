@@ -502,4 +502,98 @@ router.post('/education/pay', async (req, res) => {
     res.status(500).json({ error: err.message })
   }
 })
+// Pay insurance
+router.post('/insurance/pay', async (req, res) => {
+  const {
+    user_id, provider, variation_code, amount, phone,
+    plate_number, vehicle_make, vehicle_model, year,
+    engine_number, chasis_number, owner_name, owner_email
+  } = req.body
+
+  try {
+    const wallet = await pool.query(
+      'SELECT * FROM wallets WHERE user_id=$1', [user_id]
+    )
+    if (!wallet.rows[0] || wallet.rows[0].balance < amount) {
+      return res.status(400).json({ error: 'Insufficient wallet balance' })
+    }
+
+    const reference = 'ZOW-INS-' + Date.now()
+
+    const response = await fetch(`${VTPASS_BASE_URL}/pay`, {
+      method: 'POST',
+      headers: {
+        'api-key': VTPASS_API_KEY,
+        'secret-key': VTPASS_SECRET_KEY,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        request_id: reference,
+        serviceID: provider,
+        variation_code,
+        amount,
+        phone,
+        billersCode: plate_number,
+        Insured_Name: owner_name,
+        Engine_Number: engine_number,
+        Chasis_Number: chasis_number,
+        Plate_Number: plate_number,
+        Vehicle_Make: vehicle_make,
+        Vehicle_Model: vehicle_model,
+        Year_of_Manufacture: year,
+        Contact_Address: 'Nigeria',
+        email: owner_email || `${phone}@zowpay.com`
+      })
+    })
+
+    const data = await response.json()
+    console.log('VTPass insurance response:', data)
+
+    const success = data.code === '000' ||
+      data?.content?.transactions?.status === 'delivered'
+
+    if (success) {
+      await pool.query(
+        'UPDATE wallets SET balance = balance - $1, updated_at=NOW() WHERE user_id=$2',
+        [amount, user_id]
+      )
+
+      // ₦100 = 1 ZowPoint for insurance
+      const zowpoints = Math.floor(amount / 100)
+
+      await pool.query(
+        'UPDATE wallets SET zowpoints = zowpoints + $1 WHERE user_id=$2',
+        [zowpoints, user_id]
+      )
+
+      await pool.query(
+        `INSERT INTO transactions
+         (user_id, type, amount, description, reference, status, zowpoints_earned)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          user_id, 'insurance', amount,
+          `${provider} Insurance - ${plate_number}`,
+          reference, 'success', zowpoints
+        ]
+      )
+
+      const token = data?.content?.transactions?.token ||
+        data?.content?.transactions?.pin ||
+        data?.content?.transactions?.reference || null
+
+      res.json({
+        success: true,
+        message: `${provider} insurance activated for ${plate_number}!`,
+        token,
+        zowpoints_earned: zowpoints
+      })
+    } else {
+      res.status(400).json({
+        error: data.response_description || 'Payment failed'
+      })
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
 module.exports = router
