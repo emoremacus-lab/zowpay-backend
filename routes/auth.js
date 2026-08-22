@@ -15,43 +15,50 @@ router.post('/send-otp', async (req, res) => {
       [phone, otp, expires]
     )
 
-    // Send real SMS via Termii
-    const smsResponse = await fetch('https://api.ng.termii.com/api/sms/otp/send', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    api_key: process.env.TERMII_API_KEY,
-    message_type: 'NUMERIC',
-    to: phone,
-    from: 'generic',
-    channel: 'generic',
-    pin_attempts: 3,
-    pin_time_to_live: 10,
-    pin_length: 6,
-    pin_placeholder: '< 1234 >',
-    message_text: `Your Zowpay verification code is < 1234 >. Valid for 10 minutes.`,
-    pin_type: 'NUMERIC'
-  })
+    // Send SMS via Termii
+    try {
+      const smsResponse = await fetch(
+        'https://api.ng.termii.com/api/sms/send',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            api_key: process.env.TERMII_API_KEY,
+            to: phone,
+            from: 'generic',
+            sms: `Your Zowpay verification code is: ${otp}. Valid for 10 minutes. Do not share this code.`,
+            type: 'plain',
+            channel: 'generic'
+          })
+        }
+      )
+      const smsData = await smsResponse.json()
+      console.log('Termii response:', JSON.stringify(smsData))
+    } catch (smsErr) {
+      console.log('SMS error:', smsErr.message)
+    }
+
+    // Always return success with dev OTP for testing
+    res.json({
+      success: true,
+      message: 'OTP sent',
+      dev_otp: otp // TEMPORARY — remove before public launch
+    })
+
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
 })
-
-  res.json({ 
-  success: true, 
-  message: 'OTP sent',
-  // TEMPORARY — remove before public launch
-  dev_otp: otp
-})
-
-
-
-
-    //
 
 // Verify OTP
 router.post('/verify-otp', async (req, res) => {
   const { phone, otp_code } = req.body
   try {
     const result = await pool.query(
-      'SELECT * FROM otps WHERE phone=$1 AND otp_code=$2 AND used=false AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1',
+      `SELECT * FROM otps 
+       WHERE phone=$1 AND otp_code=$2 
+       AND used=false AND expires_at > NOW() 
+       ORDER BY created_at DESC LIMIT 1`,
       [phone, otp_code]
     )
 
@@ -59,17 +66,20 @@ router.post('/verify-otp', async (req, res) => {
       return res.status(400).json({ error: 'Invalid or expired OTP' })
     }
 
-    // Mark OTP as used
-    await pool.query('UPDATE otps SET used=true WHERE id=$1', [result.rows[0].id])
+    await pool.query(
+      'UPDATE otps SET used=true WHERE id=$1',
+      [result.rows[0].id]
+    )
 
-    // Create user if new
-    let user = await pool.query('SELECT * FROM users WHERE phone=$1', [phone])
+    let user = await pool.query(
+      'SELECT * FROM users WHERE phone=$1', [phone]
+    )
+
     if (user.rows.length === 0) {
       user = await pool.query(
         'INSERT INTO users (phone, is_verified) VALUES ($1, true) RETURNING *',
         [phone]
       )
-      // Create wallet for new user
       await pool.query(
         'INSERT INTO wallets (user_id, balance, zowpoints) VALUES ($1, 0, 0)',
         [user.rows[0].id]
@@ -81,6 +91,7 @@ router.post('/verify-otp', async (req, res) => {
     res.status(500).json({ error: err.message })
   }
 })
+
 // Update profile
 router.post('/update-profile', async (req, res) => {
   const { user_id, full_name, email } = req.body
@@ -94,4 +105,5 @@ router.post('/update-profile', async (req, res) => {
     res.status(500).json({ error: err.message })
   }
 })
+
 module.exports = router
