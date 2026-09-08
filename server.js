@@ -27,6 +27,10 @@ app.use('/api/merchants', merchantsRoutes)
 
 const rewardsRoutes = require('./routes/rewards')
 app.use('/api/rewards', rewardsRoutes)
+
+const referralsRoutes = require('./routes/referrals')
+app.use('/api/referrals', referralsRoutes)
+
 const adminRoutes = require('./routes/admin')
 app.use('/api/admin', adminRoutes)
 // Test route

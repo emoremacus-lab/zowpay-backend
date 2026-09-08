@@ -111,6 +111,17 @@ router.post('/verify', async (req, res) => {
   }
 })
 
+// Complete referral if this is first deposit
+try {
+  await fetch(`http://localhost:${process.env.PORT || 3000}/api/referrals/complete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user_id })
+  })
+} catch (refErr) {
+  console.log('Referral check:', refErr.message)
+}
+
 // Create virtual account
 router.post('/create-virtual-account', async (req, res) => {
   const { user_id, phone, email, full_name } = req.body
