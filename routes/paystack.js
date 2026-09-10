@@ -111,15 +111,32 @@ router.post('/verify', async (req, res) => {
   }
 })
 
-// Complete referral if this is first deposit
+// Complete referral if first deposit
 try {
-  await fetch(`http://localhost:${process.env.PORT || 3000}/api/referrals/complete`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ user_id })
-  })
+  const pool2 = require('../db')
+  const referral = await pool2.query(
+    `SELECT * FROM referrals WHERE referred_id=$1 AND status='pending'`,
+    [user_id]
+  )
+  if (referral.rows.length > 0) {
+    const ref = referral.rows[0]
+    const pointsEach = 500
+    await pool2.query(
+      'UPDATE wallets SET zowpoints = zowpoints + $1 WHERE user_id=$2',
+      [pointsEach, ref.referrer_id]
+    )
+    await pool2.query(
+      'UPDATE wallets SET zowpoints = zowpoints + $1 WHERE user_id=$2',
+      [pointsEach, user_id]
+    )
+    await pool2.query(
+      `UPDATE referrals SET status='completed', points_awarded=$1 WHERE id=$2`,
+      [pointsEach, ref.id]
+    )
+    console.log('Referral completed for user:', user_id)
+  }
 } catch (refErr) {
-  console.log('Referral check:', refErr.message)
+  console.log('Referral error:', refErr.message)
 }
 
 // Create virtual account
