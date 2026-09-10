@@ -11,6 +11,59 @@ const isMerchant = async (user_id) => {
   return result.rows[0]?.user_type === 'merchant'
 }
 
+// Complete referral helper
+const completeReferral = async (user_id) => {
+  try {
+    const referral = await pool.query(
+      `SELECT * FROM referrals 
+       WHERE referred_id=$1 AND status='pending'`,
+      [user_id]
+    )
+    if (referral.rows.length > 0) {
+      const ref = referral.rows[0]
+      const pointsEach = 500
+
+      await pool.query(
+        'UPDATE wallets SET zowpoints = zowpoints + $1 WHERE user_id=$2',
+        [pointsEach, ref.referrer_id]
+      )
+      await pool.query(
+        'UPDATE wallets SET zowpoints = zowpoints + $1 WHERE user_id=$2',
+        [pointsEach, user_id]
+      )
+      await pool.query(
+        `INSERT INTO transactions
+         (user_id, type, amount, description, reference, status, zowpoints_earned)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          ref.referrer_id, 'reward', 0,
+          'Referral bonus — friend joined Zowpay!',
+          'REF-BONUS-' + Date.now(), 'success', pointsEach
+        ]
+      )
+      await pool.query(
+        `INSERT INTO transactions
+         (user_id, type, amount, description, reference, status, zowpoints_earned)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          user_id, 'reward', 0,
+          'Welcome bonus — referral code applied!',
+          'REF-WELCOME-' + Date.now(), 'success', pointsEach
+        ]
+      )
+      await pool.query(
+        `UPDATE referrals 
+         SET status='completed', points_awarded=$1 
+         WHERE id=$2`,
+        [pointsEach, ref.id]
+      )
+      console.log('Referral completed for user:', user_id)
+    }
+  } catch (err) {
+    console.log('Referral completion error:', err.message)
+  }
+}
+
 // Initialize payment
 router.post('/initialize', async (req, res) => {
   const { user_id, amount, email } = req.body
@@ -98,11 +151,14 @@ router.post('/verify', async (req, res) => {
       ]
     )
 
+    // Complete referral if first deposit
+    await completeReferral(user_id)
+
     res.json({
       success: true,
       message: merchantUser
         ? `₦${amount} added to wallet!`
-        : `₦${amount} added to wallet! Earned ${zowpoints} ZowPoints`,
+        : `₦${amount} added! Earned ${zowpoints} ZowPoints`,
       amount,
       zowpoints
     })
@@ -110,34 +166,6 @@ router.post('/verify', async (req, res) => {
     res.status(500).json({ error: err.message })
   }
 })
-
-// Complete referral if first deposit
-try {
-  const pool2 = require('../db')
-  const referral = await pool2.query(
-    `SELECT * FROM referrals WHERE referred_id=$1 AND status='pending'`,
-    [user_id]
-  )
-  if (referral.rows.length > 0) {
-    const ref = referral.rows[0]
-    const pointsEach = 500
-    await pool2.query(
-      'UPDATE wallets SET zowpoints = zowpoints + $1 WHERE user_id=$2',
-      [pointsEach, ref.referrer_id]
-    )
-    await pool2.query(
-      'UPDATE wallets SET zowpoints = zowpoints + $1 WHERE user_id=$2',
-      [pointsEach, user_id]
-    )
-    await pool2.query(
-      `UPDATE referrals SET status='completed', points_awarded=$1 WHERE id=$2`,
-      [pointsEach, ref.id]
-    )
-    console.log('Referral completed for user:', user_id)
-  }
-} catch (refErr) {
-  console.log('Referral error:', refErr.message)
-}
 
 // Create virtual account
 router.post('/create-virtual-account', async (req, res) => {
@@ -302,6 +330,9 @@ router.post('/webhook', async (req, res) => {
                 reference, 'success', zowpoints
               ]
             )
+
+            // Complete referral if first deposit
+            await completeReferral(userId)
 
             console.log(`Wallet funded: ₦${amount} for user ${userId}`)
           }
