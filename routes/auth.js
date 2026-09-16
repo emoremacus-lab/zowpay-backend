@@ -38,12 +38,12 @@ router.post('/send-otp', async (req, res) => {
       console.log('SMS error:', smsErr.message)
     }
 
-    // Always return success with dev OTP for testing
-    res.json({
-      success: true,
-      message: 'OTP sent',
-      dev_otp: otp // TEMPORARY — remove before public launch
-    })
+    const isDev = process.env.NODE_ENV !== 'production'
+res.json({
+  success: true,
+  message: 'OTP sent',
+  ...(isDev && { dev_otp: otp })
+})
 
   } catch (err) {
     res.status(500).json({ error: err.message })
