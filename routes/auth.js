@@ -38,11 +38,10 @@ router.post('/send-otp', async (req, res) => {
       console.log('SMS error:', smsErr.message)
     }
 
-    const isDev = process.env.NODE_ENV !== 'production'
-res.json({
+  res.json({
   success: true,
   message: 'OTP sent',
-  ...(isDev && { dev_otp: otp })
+  dev_otp: otp // Keep until Termii is fully activated
 })
 
   } catch (err) {
