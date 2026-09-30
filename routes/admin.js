@@ -198,15 +198,33 @@ router.post('/proofs/reject', async (req, res) => {
   }
 })
 
-// Suspend user
+// Suspend or reactivate user (toggle)
 router.post('/users/suspend', async (req, res) => {
   const { user_id } = req.body
   try {
-    await pool.query(
-      `UPDATE users SET is_verified=false WHERE id=$1`,
+    // Get current status first
+    const user = await pool.query(
+      'SELECT is_verified FROM users WHERE id=$1',
       [user_id]
     )
-    res.json({ success: true, message: 'User suspended' })
+
+    if (user.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' })
+    }
+
+    const currentStatus = user.rows[0].is_verified
+
+    // Toggle — if currently verified, suspend. If suspended, reactivate
+    await pool.query(
+      'UPDATE users SET is_verified=$1 WHERE id=$2',
+      [!currentStatus, user_id]
+    )
+
+    res.json({
+      success: true,
+      message: currentStatus ? 'User suspended!' : 'User reactivated!',
+      is_verified: !currentStatus
+    })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
