@@ -1,7 +1,10 @@
 const express = require('express')
 const router = express.Router()
 const pool = require('../db')
-
+const { adminLogin, loginLimiter, requireAdmin, auditLogger } = require('../middleware/adminAuth')
+router.post('/login', loginLimiter, adminLogin)
+router.use(requireAdmin)
+router.use(auditLogger)
 // Get admin overview stats
 router.get('/stats', async (req, res) => {
   try {
@@ -260,5 +263,15 @@ router.get('/revenue', async (req, res) => {
     res.status(500).json({ error: err.message })
   }
 })
+router.post('/export-log', (req, res) => res.json({ success: true }))
 
+router.get('/audit', async (req, res) => {
+  try {
+    const r = await pool.query(
+      'SELECT id, method, path, details, ip, created_at FROM admin_audit_log ORDER BY created_at DESC LIMIT 200')
+    res.json({ success: true, logs: r.rows })
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Could not load audit log' })
+  }
+})
 module.exports = router
