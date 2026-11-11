@@ -40,7 +40,11 @@ app.use(cors({
 // ═══════════════════════════════════════
 // BODY PARSING — limit payload size
 // ═══════════════════════════════════════
-app.use(express.json({ limit: '10kb' }))
+// Keep the raw body so Paystack webhook signatures can be verified
+app.use(express.json({
+  limit: '100kb',
+  verify: (req, res, buf) => { req.rawBody = buf }
+}))
 app.use(express.urlencoded({ extended: true, limit: '10kb' }))
 
 // ═══════════════════════════════════════
@@ -54,6 +58,8 @@ const generalLimiter = rateLimit({
   message: {
     error: 'Too many requests. Please try again later.'
   },
+  // Paystack's webhook must never be blocked
+  skip: (req) => req.path === '/paystack/webhook',
   standardHeaders: true,
   legacyHeaders: false
 })
@@ -111,7 +117,8 @@ app.use('/api/wallet', walletRoutes)
 
 // Paystack — payment rate limited
 const paystackRoutes = require('./routes/paystack')
-app.use('/api/paystack/initialize', paymentLimiter)
+app.use('/api/bills/checkout', paymentLimiter)
+app.use('/api/merchants/missions/create', paymentLimiter)
 app.use('/api/paystack', paystackRoutes)
 
 // Bills

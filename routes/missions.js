@@ -162,29 +162,34 @@ router.get('/user/:user_id', async (req, res) => {
   }
 })
 
-// Approve mission completion
+// Approve mission completion — ZowPoints only (no cash), and only once
 router.post('/approve', async (req, res) => {
-  const { completion_id, user_id, mission_id } = req.body
+  const { completion_id } = req.body
   try {
-    const mission = await pool.query(
-      'SELECT * FROM missions WHERE id=$1', [mission_id]
-    )
-    if (mission.rows.length === 0) {
-      return res.status(404).json({ error: 'Mission not found' })
-    }
-
-    const rewardPoints = mission.rows[0].reward_points || 0
-    const rewardCash = mission.rows[0].reward_cash || 0
-
-    // Update completion status
-    await pool.query(
-      `UPDATE mission_completions
-       SET status='approved', reviewed_at=NOW()
-       WHERE id=$1`,
+    const info = await pool.query(
+      `SELECT mc.user_id, mc.mission_id, m.title, m.reward_points
+       FROM mission_completions mc
+       JOIN missions m ON mc.mission_id = m.id
+       WHERE mc.id=$1 AND mc.status='pending'`,
       [completion_id]
     )
+    if (info.rows.length === 0) {
+      return res.status(400).json({ error: 'Submission not found or already reviewed' })
+    }
+    const { user_id, title } = info.rows[0]
+    const rewardPoints = info.rows[0].reward_points || 0
 
-    // Award ZowPoints
+    // Only the first approval can move pending -> approved
+    const claim = await pool.query(
+      `UPDATE mission_completions
+       SET status='approved', reviewed_at=NOW()
+       WHERE id=$1 AND status='pending' RETURNING id`,
+      [completion_id]
+    )
+    if (claim.rows.length === 0) {
+      return res.status(400).json({ error: 'Submission already reviewed' })
+    }
+
     if (rewardPoints > 0) {
       await pool.query(
         'UPDATE wallets SET zowpoints = zowpoints + $1 WHERE user_id=$2',
@@ -192,27 +197,15 @@ router.post('/approve', async (req, res) => {
       )
     }
 
-    // Award cash
-    if (rewardCash > 0) {
-      await pool.query(
-        'UPDATE wallets SET balance = balance + $1 WHERE user_id=$2',
-        [rewardCash, user_id]
-      )
-    }
-
-    // Record transaction
     await pool.query(
       `INSERT INTO transactions
        (user_id, type, amount, description, reference, status, zowpoints_earned)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [
-        user_id, 'reward', rewardCash,
-        `Mission reward: ${mission.rows[0].title}`,
-        'MISSION-' + Date.now(), 'success', rewardPoints
-      ]
+      [user_id, 'reward', 0, `Mission reward: ${title}`,
+       'REWARD-' + completion_id, 'success', rewardPoints]
     )
 
-    res.json({ success: true, message: 'Mission approved and reward sent!' })
+    res.json({ success: true, message: 'Mission approved and ZowPoints sent!' })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -255,7 +248,7 @@ router.post('/seed', async (req, res) => {
         description: 'Share the Zowpay app link on your WhatsApp status for 24 hours',
         category: 'Social',
         reward_points: 200,
-        reward_cash: 500,
+        reward_cash: 0,
         max_participants: 500,
         budget: 250000,
         proof_instructions: 'Screenshot your WhatsApp status showing the Zowpay post',
