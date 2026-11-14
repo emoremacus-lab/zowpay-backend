@@ -7,12 +7,86 @@ const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://zowpay.ng'
 const SERVICE_FEE_RATE = 0.05
 
+// Zowpay rules for campaigns
+// Every point is backed by the merchant's money: NGN 1 of budget = POINTS_PER_NAIRA points.
+// The merchant chooses the budget and the number of people. The server works out
+// the points per person, so a merchant can never hand out more points than they paid for.
+const POINTS_PER_NAIRA = 2
+const MIN_BUDGET = 1000
+const MAX_BUDGET = 500000
+const MAX_PEOPLE = 1000
+const MIN_POINTS_PER_PERSON = 20
+const MAX_POINTS_PER_PERSON = 2000
+
 // A campaign is saved as 'pending_payment' and only becomes 'active'
 // once Paystack confirms the merchant's payment. No stored balance.
 pool.query('ALTER TABLE missions ADD COLUMN IF NOT EXISTS payment_reference TEXT')
   .catch(err => console.error('missions column error:', err.message))
 pool.query('ALTER TABLE missions ADD COLUMN IF NOT EXISTS payment_amount NUMERIC')
   .catch(err => console.error('missions column error:', err.message))
+
+// Approves one submission safely: locks the mission, makes sure the campaign still has
+// room, pays the points once, and closes the campaign when everyone has been paid.
+const approveCompletion = async (completion_id) => {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const info = await client.query(
+      `SELECT mc.id, mc.user_id, mc.mission_id, mc.status,
+              m.title, m.reward_points, m.max_participants
+       FROM mission_completions mc
+       JOIN missions m ON mc.mission_id = m.id
+       WHERE mc.id=$1
+       FOR UPDATE OF mc, m`,
+      [completion_id]
+    )
+    if (info.rows.length === 0 || info.rows[0].status !== 'pending') {
+      await client.query('ROLLBACK')
+      return { error: 'Submission not found or already reviewed' }
+    }
+    const c = info.rows[0]
+    const points = Number(c.reward_points) || 0
+
+    const done = await client.query(
+      `SELECT COUNT(*) FROM mission_completions
+       WHERE mission_id=$1 AND status='approved'`,
+      [c.mission_id]
+    )
+    const approvedSoFar = Number(done.rows[0].count)
+    if (approvedSoFar >= Number(c.max_participants)) {
+      await client.query('ROLLBACK')
+      return { error: 'This campaign has used all of its points' }
+    }
+
+    await client.query(
+      `UPDATE mission_completions SET status='approved', reviewed_at=NOW() WHERE id=$1`,
+      [completion_id]
+    )
+    if (points > 0) {
+      await client.query(
+        'UPDATE wallets SET zowpoints = zowpoints + $1 WHERE user_id=$2',
+        [points, c.user_id]
+      )
+    }
+    await client.query(
+      `INSERT INTO transactions
+       (user_id, type, amount, description, reference, status, zowpoints_earned)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [c.user_id, 'reward', 0, `Mission reward: ${c.title}`,
+       'REWARD-' + completion_id, 'success', points]
+    )
+    if (approvedSoFar + 1 >= Number(c.max_participants)) {
+      await client.query(`UPDATE missions SET status='completed' WHERE id=$1`, [c.mission_id])
+    }
+    await client.query('COMMIT')
+    return { ok: true, points, title: c.title }
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
+}
 
 // Called by the Paystack webhook and by /missions/confirm. Safe to call many times.
 const processPaidCampaign = async (reference, paidAmount) => {
@@ -75,11 +149,39 @@ router.get('/profile/:user_id', async (req, res) => {
   }
 })
 
+// Lets the app show the merchant the reward and the total before paying.
+router.get('/missions/preview/:budget/:people', (req, res) => {
+  const budget = Number(req.params.budget)
+  const people = parseInt(req.params.people)
+  if (!Number.isFinite(budget) || !Number.isInteger(people) || people < 1) {
+    return res.status(400).json({ error: 'Invalid input' })
+  }
+  const pointsPerPerson = Math.floor((budget * POINTS_PER_NAIRA) / people)
+  const serviceFee = Math.round(budget * SERVICE_FEE_RATE * 100) / 100
+  let problem = null
+  if (budget < MIN_BUDGET || budget > MAX_BUDGET) {
+    problem = `Budget must be between ₦${MIN_BUDGET.toLocaleString()} and ₦${MAX_BUDGET.toLocaleString()}`
+  } else if (people > MAX_PEOPLE) {
+    problem = `Maximum ${MAX_PEOPLE} people per campaign`
+  } else if (pointsPerPerson < MIN_POINTS_PER_PERSON) {
+    problem = 'Reward per person is too small. Raise the budget or reduce the people.'
+  } else if (pointsPerPerson > MAX_POINTS_PER_PERSON) {
+    problem = `Reward per person is above ${MAX_POINTS_PER_PERSON.toLocaleString()} points. Add more people or lower the budget.`
+  }
+  res.json({
+    success: !problem,
+    problem,
+    points_per_person: pointsPerPerson,
+    service_fee: serviceFee,
+    total: budget + serviceFee
+  })
+})
+
 // Create a campaign: saves it as pending_payment and returns a Paystack checkout link
 router.post('/missions/create', async (req, res) => {
   const {
     merchant_id, email, title, description, type,
-    reward_points, budget, max_participants, proof_type,
+    budget, max_participants, proof_type,
     time_estimate, category
   } = req.body
 
@@ -92,9 +194,30 @@ router.post('/missions/create', async (req, res) => {
     }
 
     const campaignBudget = Number(budget)
-    if (!title || !(campaignBudget >= 1000) || !(Number(reward_points) > 0) ||
-        !(Number(max_participants) > 0)) {
+    const people = parseInt(max_participants)
+    if (!title || !Number.isFinite(campaignBudget) || !Number.isInteger(people)) {
       return res.status(400).json({ error: 'Please fill in all campaign details' })
+    }
+    if (campaignBudget < MIN_BUDGET || campaignBudget > MAX_BUDGET) {
+      return res.status(400).json({
+        error: `Budget must be between ₦${MIN_BUDGET.toLocaleString()} and ₦${MAX_BUDGET.toLocaleString()}`
+      })
+    }
+    if (people < 1 || people > MAX_PEOPLE) {
+      return res.status(400).json({ error: `Number of people must be between 1 and ${MAX_PEOPLE}` })
+    }
+
+    // The server decides the reward. The merchant cannot type their own number.
+    const pointsPerPerson = Math.floor((campaignBudget * POINTS_PER_NAIRA) / people)
+    if (pointsPerPerson < MIN_POINTS_PER_PERSON) {
+      return res.status(400).json({
+        error: `Each person would get only ${pointsPerPerson} points. Raise the budget or reduce the number of people.`
+      })
+    }
+    if (pointsPerPerson > MAX_POINTS_PER_PERSON) {
+      return res.status(400).json({
+        error: `Each person would get ${pointsPerPerson.toLocaleString()} points, above the ${MAX_POINTS_PER_PERSON.toLocaleString()} limit. Add more people or lower the budget.`
+      })
     }
 
     const serviceFee = Math.round(campaignBudget * SERVICE_FEE_RATE * 100) / 100
@@ -108,8 +231,8 @@ router.post('/missions/create', async (req, res) => {
         time_estimate, category, status, payment_reference, payment_amount)
        VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8, $9, $10, 'pending_payment', $11, $12)
        RETURNING *`,
-      [merchant_id, title, description, type, reward_points, campaignBudget,
-       max_participants, proof_type, time_estimate, category, reference, totalRequired]
+      [merchant_id, title, description, type, pointsPerPerson, campaignBudget,
+       people, proof_type, time_estimate, category, reference, totalRequired]
     )
 
     const response = await fetch('https://api.paystack.co/transaction/initialize', {
@@ -141,6 +264,7 @@ router.post('/missions/create', async (req, res) => {
       reference,
       service_fee: serviceFee,
       total: totalRequired,
+      points_per_person: pointsPerPerson,
       mission: result.rows[0]
     })
   } catch (err) {
@@ -229,51 +353,16 @@ router.get('/submissions/:mission_id', async (req, res) => {
   }
 })
 
-// Approve submission — ZowPoints only (no cash), and only once
+// Approve submission — ZowPoints only (no cash), once, and within the campaign's budget
 router.post('/submissions/approve', async (req, res) => {
   const { completion_id } = req.body
   try {
-    const info = await pool.query(
-      `SELECT mc.user_id, mc.mission_id, m.title, m.reward_points
-       FROM mission_completions mc
-       JOIN missions m ON mc.mission_id = m.id
-       WHERE mc.id=$1 AND mc.status='pending'`,
-      [completion_id]
-    )
-    if (info.rows.length === 0) {
-      return res.status(400).json({ error: 'Submission not found or already reviewed' })
-    }
-    const { user_id, title } = info.rows[0]
-    const points = info.rows[0].reward_points || 0
-
-    const claim = await pool.query(
-      `UPDATE mission_completions
-       SET status='approved', reviewed_at=NOW()
-       WHERE id=$1 AND status='pending' RETURNING id`,
-      [completion_id]
-    )
-    if (claim.rows.length === 0) {
-      return res.status(400).json({ error: 'Submission already reviewed' })
-    }
-
-    if (points > 0) {
-      await pool.query(
-        'UPDATE wallets SET zowpoints = zowpoints + $1 WHERE user_id=$2',
-        [points, user_id]
-      )
-    }
-
-    await pool.query(
-      `INSERT INTO transactions
-       (user_id, type, amount, description, reference, status, zowpoints_earned)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [user_id, 'reward', 0, `Mission approved: ${title}`,
-       'REWARD-' + completion_id, 'success', points]
-    )
-
+    const r = await approveCompletion(completion_id)
+    if (r.error) return res.status(400).json({ error: r.error })
     res.json({ success: true, message: 'Submission approved and ZowPoints sent!' })
   } catch (err) {
-    res.status(500).json({ error: err.message })
+    console.error('Approve error:', err)
+    res.status(500).json({ error: 'Could not approve submission' })
   }
 })
 
@@ -328,3 +417,4 @@ router.get('/stats/:merchant_id', async (req, res) => {
 
 module.exports = router
 module.exports.processPaidCampaign = processPaidCampaign
+module.exports.approveCompletion = approveCompletion

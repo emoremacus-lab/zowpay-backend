@@ -2,6 +2,7 @@ const express = require('express')
 const router = express.Router()
 const pool = require('../db')
 const multer = require('multer')
+const { approveCompletion } = require('./merchants')
 
 // Multer setup — store in memory, max 5MB
 const upload = multer({
@@ -89,6 +90,18 @@ router.post('/submit', upload.single('proof_file'), async (req, res) => {
     if (mission.rows.length === 0) {
       return res.status(404).json({ error: 'Mission not found' })
     }
+    if (mission.rows[0].status !== 'active') {
+      return res.status(400).json({ error: 'This campaign is not open' })
+    }
+    // Pending and approved submissions both use up a place; rejected ones free it
+    const taken = await pool.query(
+      `SELECT COUNT(*) FROM mission_completions
+       WHERE mission_id=$1 AND status IN ('pending','approved')`,
+      [mission_id]
+    )
+    if (Number(taken.rows[0].count) >= Number(mission.rows[0].max_participants)) {
+      return res.status(400).json({ error: 'This campaign is full' })
+    }
 
     // Handle file if uploaded — convert to base64
     let proof_url = null
@@ -162,52 +175,16 @@ router.get('/user/:user_id', async (req, res) => {
   }
 })
 
-// Approve mission completion — ZowPoints only (no cash), and only once
+// Approve mission completion — same safe logic as the merchant route
 router.post('/approve', async (req, res) => {
   const { completion_id } = req.body
   try {
-    const info = await pool.query(
-      `SELECT mc.user_id, mc.mission_id, m.title, m.reward_points
-       FROM mission_completions mc
-       JOIN missions m ON mc.mission_id = m.id
-       WHERE mc.id=$1 AND mc.status='pending'`,
-      [completion_id]
-    )
-    if (info.rows.length === 0) {
-      return res.status(400).json({ error: 'Submission not found or already reviewed' })
-    }
-    const { user_id, title } = info.rows[0]
-    const rewardPoints = info.rows[0].reward_points || 0
-
-    // Only the first approval can move pending -> approved
-    const claim = await pool.query(
-      `UPDATE mission_completions
-       SET status='approved', reviewed_at=NOW()
-       WHERE id=$1 AND status='pending' RETURNING id`,
-      [completion_id]
-    )
-    if (claim.rows.length === 0) {
-      return res.status(400).json({ error: 'Submission already reviewed' })
-    }
-
-    if (rewardPoints > 0) {
-      await pool.query(
-        'UPDATE wallets SET zowpoints = zowpoints + $1 WHERE user_id=$2',
-        [rewardPoints, user_id]
-      )
-    }
-
-    await pool.query(
-      `INSERT INTO transactions
-       (user_id, type, amount, description, reference, status, zowpoints_earned)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [user_id, 'reward', 0, `Mission reward: ${title}`,
-       'REWARD-' + completion_id, 'success', rewardPoints]
-    )
-
+    const r = await approveCompletion(completion_id)
+    if (r.error) return res.status(400).json({ error: r.error })
     res.json({ success: true, message: 'Mission approved and ZowPoints sent!' })
   } catch (err) {
-    res.status(500).json({ error: err.message })
+    console.error('Approve error:', err)
+    res.status(500).json({ error: 'Could not approve submission' })
   }
 })
 
@@ -218,7 +195,7 @@ router.post('/reject', async (req, res) => {
     await pool.query(
       `UPDATE mission_completions
        SET status='rejected', reviewed_at=NOW()
-       WHERE id=$1`,
+       WHERE id=$1 AND status='pending'`,
       [completion_id]
     )
     res.json({ success: true, message: 'Submission rejected' })
