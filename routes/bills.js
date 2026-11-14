@@ -9,15 +9,26 @@ const VTPASS_SECRET_KEY = process.env.VTPASS_SECRET_KEY
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://zowpay.ng'
 
-// ZowPoints: naira spent per 1 point
-const POINT_RATE = {
-  airtime: 20,
-  data: 20,
-  betting: 50,
-  electricity: 100,
-  cable: 100,
-  education: 100,
-  insurance: 100
+// ---------- Zowpay rules for bills (change numbers here, nowhere else) ----------
+// Bills earn NO ZowPoints. Points come only from merchant campaigns.
+// Service fee: paid by the customer on top of the bill, kept by Zowpay.
+// Airtime has no fee, so it has a maximum per purchase instead.
+const FEE_RULES = {
+  noFeeTypes: ['airtime'],
+  smallFee: 50,          // bills under the threshold
+  largeFee: 150,         // bills at or above the threshold (Paystack adds a flat NGN 100 here)
+  threshold: 2500
+}
+const AIRTIME_MAX = 2000
+
+// Referral guardrails: the bonus is paid on the first bill of at least this amount,
+// and one person can be rewarded for at most this many referrals.
+const REFERRAL_MIN_BILL = 500
+const REFERRAL_MAX_PER_USER = 10
+
+const calcFee = (type, amount) => {
+  if (FEE_RULES.noFeeTypes.includes(type)) return 0
+  return Number(amount) >= FEE_RULES.threshold ? FEE_RULES.largeFee : FEE_RULES.smallFee
 }
 
 // One row per bill. Customer pays at checkout, then we deliver.
@@ -39,7 +50,9 @@ pool.query(`
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
   )
-`).catch(err => console.error('bill_orders table error:', err.message))
+`).then(() => pool.query(
+  'ALTER TABLE bill_orders ADD COLUMN IF NOT EXISTS fee NUMERIC NOT NULL DEFAULT 0'
+)).catch(err => console.error('bill_orders table error:', err.message))
 
 const DATA_PLANS = {
   mtn: [
@@ -153,9 +166,11 @@ const makeReference = (type) => {
   return `${lagos}ZOW${type.slice(0, 3).toUpperCase()}${rand}`
 }
 
-// Referral bonus: both people get 500 points on the referred user's first purchase
-const completeReferral = async (user_id) => {
+// Referral bonus: both people get 500 points once the referred user pays a bill of
+// at least REFERRAL_MIN_BILL. A referrer can be rewarded at most REFERRAL_MAX_PER_USER times.
+const completeReferral = async (user_id, billAmount) => {
   try {
+    if (Number(billAmount) < REFERRAL_MIN_BILL) return
     const referral = await pool.query(
       `SELECT * FROM referrals WHERE referred_id=$1 AND status='pending'`,
       [user_id]
@@ -163,6 +178,12 @@ const completeReferral = async (user_id) => {
     if (referral.rows.length === 0) return
     const ref = referral.rows[0]
     const pointsEach = 500
+
+    const done = await pool.query(
+      `SELECT COUNT(*) FROM referrals WHERE referrer_id=$1 AND status='completed'`,
+      [ref.referrer_id]
+    )
+    if (Number(done.rows[0].count) >= REFERRAL_MAX_PER_USER) return
 
     await pool.query(
       'UPDATE wallets SET zowpoints = zowpoints + $1 WHERE user_id=$2',
@@ -256,8 +277,10 @@ const processPaidOrder = async (reference, paidAmount) => {
   const order = await getOrder(reference)
   if (!order) return null // not a bill payment
 
-  if (Number(order.amount) !== Number(paidAmount)) {
-    console.error(`Amount mismatch on ${reference}: order ${order.amount}, paid ${paidAmount}`)
+  // The customer pays the bill amount plus the service fee
+  const expectedTotal = Number(order.amount) + Number(order.fee || 0)
+  if (Math.abs(expectedTotal - Number(paidAmount)) > 0.01) {
+    console.error(`Amount mismatch on ${reference}: expected ${expectedTotal}, paid ${paidAmount}`)
     await setStatus(reference, 'amount_mismatch')
     return order
   }
@@ -300,23 +323,18 @@ const processPaidOrder = async (reference, paidAmount) => {
     (data.code === '000' && !inProgress && !['failed', 'reversed'].includes(txStatus))
 
   if (delivered) {
-    const points = Math.floor(amount / (POINT_RATE[o.type] || 100))
     const token = data?.content?.transactions?.token ||
       data?.content?.transactions?.pin ||
       data?.purchased_code || null
 
     await pool.query(
-      'UPDATE wallets SET zowpoints = zowpoints + $1 WHERE user_id=$2',
-      [points, o.user_id]
-    )
-    await pool.query(
       `INSERT INTO transactions
        (user_id, type, amount, description, reference, status, zowpoints_earned)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [o.user_id, o.type, amount, o.description, o.reference, 'success', points]
+      [o.user_id, o.type, amount, o.description, o.reference, 'success', 0]
     )
-    await setStatus(reference, 'delivered', { vtpass: data, token, points })
-    await completeReferral(o.user_id)
+    await setStatus(reference, 'delivered', { vtpass: data, token, points: 0 })
+    await completeReferral(o.user_id, amount)
   } else if (inProgress) {
     await setStatus(reference, 'pending_delivery', { vtpass: data })
   } else {
@@ -351,6 +369,8 @@ const publicOrder = (o) => ({
   reference: o.reference,
   type: o.type,
   amount: Number(o.amount),
+  fee: Number(o.fee || 0),
+  total: Number(o.amount) + Number(o.fee || 0),
   description: o.description,
   token: o.token,
   zowpoints_earned: o.zowpoints_earned || 0
@@ -396,6 +416,22 @@ router.get('/data/plans/:network', (req, res) => {
   res.json({ success: true, plans: DATA_PLANS[req.params.network] || [] })
 })
 
+// Lets the app show the service fee before the customer pays.
+router.get('/fee/:type/:amount', (req, res) => {
+  const { type, amount } = req.params
+  if (!BUILDERS[type]) return res.status(400).json({ error: 'Invalid bill type' })
+  const bill = Number(amount)
+  if (!Number.isFinite(bill) || bill <= 0) return res.status(400).json({ error: 'Invalid amount' })
+  const fee = calcFee(type, bill)
+  res.json({
+    success: true,
+    amount: bill,
+    fee,
+    total: bill + fee,
+    airtime_max: type === 'airtime' ? AIRTIME_MAX : undefined
+  })
+})
+
 // Start a bill payment: creates the order and a Paystack checkout link.
 // Body: { user_id, email, type, amount, ...fields for that bill type }
 router.post('/checkout', async (req, res) => {
@@ -433,6 +469,14 @@ router.post('/checkout', async (req, res) => {
     if (!Number.isFinite(amount) || amount < 50 || amount > 500000) {
       return res.status(400).json({ error: 'Invalid amount' })
     }
+    if (type === 'airtime' && amount > AIRTIME_MAX) {
+      return res.status(400).json({
+        error: `Maximum airtime per purchase is ₦${AIRTIME_MAX.toLocaleString()}`
+      })
+    }
+
+    const fee = calcFee(type, amount)
+    const total = amount + fee
 
     const missing = builder.required.filter(k => !details[k])
     if (missing.length) {
@@ -448,9 +492,9 @@ router.post('/checkout', async (req, res) => {
     const { description } = builder.build(details, reference, amount)
 
     await pool.query(
-      `INSERT INTO bill_orders (reference, user_id, type, amount, description, details)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [reference, String(user_id), type, amount, description, JSON.stringify(details)]
+      `INSERT INTO bill_orders (reference, user_id, type, amount, fee, description, details)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [reference, String(user_id), type, amount, fee, description, JSON.stringify(details)]
     )
 
     const response = await fetch('https://api.paystack.co/transaction/initialize', {
@@ -461,10 +505,10 @@ router.post('/checkout', async (req, res) => {
       },
       body: JSON.stringify({
         email: email || `user${user_id}@zowpay.com`,
-        amount: Math.round(amount * 100),
+        amount: Math.round(total * 100),
         reference,
         callback_url: `${FRONTEND_URL}/?ref=${reference}`,
-        metadata: { user_id, order_type: type, description }
+        metadata: { user_id, order_type: type, description, bill_amount: amount, service_fee: fee }
       })
     })
     const data = await response.json()
@@ -478,7 +522,9 @@ router.post('/checkout', async (req, res) => {
       success: true,
       payment_url: data.data.authorization_url,
       reference,
-      amount
+      amount,
+      fee,
+      total
     })
   } catch (err) {
     console.error('Checkout error:', err)
