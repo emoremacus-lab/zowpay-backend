@@ -15,6 +15,7 @@ const FRONTEND_URL = process.env.FRONTEND_URL || 'https://zowpay.ng'
 // Airtime has no fee, so it has a maximum per purchase instead.
 const FEE_RULES = {
   noFeeTypes: ['airtime'],
+  noFeeBelowThreshold: ['data'], // data is free of fee under the threshold, like airtime
   smallFee: 50,          // bills under the threshold
   largeFee: 150,         // bills at or above the threshold (Paystack adds a flat NGN 100 here)
   threshold: 2500
@@ -28,6 +29,7 @@ const REFERRAL_MAX_PER_USER = 10
 
 const calcFee = (type, amount) => {
   if (FEE_RULES.noFeeTypes.includes(type)) return 0
+  if (FEE_RULES.noFeeBelowThreshold.includes(type) && Number(amount) < FEE_RULES.threshold) return 0
   return Number(amount) >= FEE_RULES.threshold ? FEE_RULES.largeFee : FEE_RULES.smallFee
 }
 
