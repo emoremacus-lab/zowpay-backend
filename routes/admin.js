@@ -1,6 +1,7 @@
 const express = require('express')
 const router = express.Router()
 const pool = require('../db')
+const { approveCompletion } = require('./merchants')
 const { adminLogin, loginLimiter, requireAdmin, auditLogger } = require('../middleware/adminAuth')
 router.post('/login', loginLimiter, adminLogin)
 router.use(requireAdmin)
@@ -20,15 +21,25 @@ router.get('/stats', async (req, res) => {
     const pendingProofs = await pool.query(
       `SELECT COUNT(*) as total FROM mission_completions WHERE status='pending'`
     )
+    // Total value of bills Zowpay has delivered (no wallet deposits any more)
     const transactions = await pool.query(
-      `SELECT COALESCE(SUM(amount), 0) as total FROM transactions WHERE type='deposit' AND status='success'`
+      `SELECT COALESCE(SUM(amount), 0) as total FROM bill_orders WHERE status='delivered'`
     )
     const zowpoints = await pool.query(
       `SELECT COALESCE(SUM(zowpoints), 0) as total FROM wallets`
     )
-    const revenue = await pool.query(
-      `SELECT COALESCE(SUM(amount), 0) as total FROM transactions WHERE type='mission' AND status='success'`
+    // Zowpay's own earnings: the 5% fee on paid campaigns + service fees on delivered bills
+    const campaignFees = await pool.query(
+      `SELECT COALESCE(SUM(payment_amount - budget), 0) as total FROM missions
+       WHERE payment_reference IS NOT NULL
+       AND status NOT IN ('pending_payment', 'cancelled')`
     )
+    const billFees = await pool.query(
+      `SELECT COALESCE(SUM(fee), 0) as total FROM bill_orders WHERE status='delivered'`
+    )
+    const revenue = {
+      rows: [{ total: Number(campaignFees.rows[0].total) + Number(billFees.rows[0].total) }]
+    }
 
     res.json({
       success: true,
@@ -119,19 +130,22 @@ router.get('/transactions', async (req, res) => {
   }
 })
 
-// Get pending proofs
+// Get proofs: every status, newest first. Photos are only sent for pending items
+// (approved and rejected ones would make the page very heavy).
 router.get('/proofs', async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT mc.*, 
+      `SELECT mc.id, mc.mission_id, mc.user_id, mc.status, mc.proof_text,
+       mc.submitted_at, mc.reviewed_at,
+       CASE WHEN mc.status='pending' THEN mc.proof_url ELSE NULL END AS proof_url,
        u.phone, u.full_name,
        m.title as mission_title,
        m.reward_points, m.reward_cash
        FROM mission_completions mc
        JOIN users u ON mc.user_id = u.id
        JOIN missions m ON mc.mission_id = m.id
-       WHERE mc.status='pending'
-       ORDER BY mc.submitted_at DESC`
+       ORDER BY mc.submitted_at DESC
+       LIMIT 200`
     )
     res.json({ success: true, proofs: result.rows })
   } catch (err) {
@@ -139,65 +153,37 @@ router.get('/proofs', async (req, res) => {
   }
 })
 
-// Approve proof from admin
+// Approve proof from admin: same safe routine as the merchant route
+// (pays once, respects the campaign's places, closes the campaign when full)
 router.post('/proofs/approve', async (req, res) => {
-  const { completion_id, user_id, mission_id } = req.body
+  const { completion_id } = req.body
   try {
-    const mission = await pool.query(
-      'SELECT * FROM missions WHERE id=$1', [mission_id]
-    )
-    const points = mission.rows[0].reward_points
-    const cash = Number(mission.rows[0].reward_cash) || 0
-
-    await pool.query(
-      `UPDATE mission_completions 
-       SET status='approved', reviewed_at=NOW() 
-       WHERE id=$1`,
-      [completion_id]
-    )
-
-    await pool.query(
-      'UPDATE wallets SET zowpoints = zowpoints + $1 WHERE user_id=$2',
-      [points, user_id]
-    )
-
-    if (cash > 0) {
-      await pool.query(
-        'UPDATE wallets SET balance = balance + $1 WHERE user_id=$2',
-        [cash, user_id]
-      )
-    }
-
-    await pool.query(
-      `INSERT INTO transactions 
-       (user_id, type, amount, description, reference, status, zowpoints_earned)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [
-        user_id, 'reward', cash,
-        `Mission approved: ${mission.rows[0].title}`,
-        'ADMIN-REWARD-' + completion_id, 'success', points
-      ]
-    )
-
+    const r = await approveCompletion(completion_id)
+    if (r.error) return res.status(400).json({ error: r.error })
     res.json({ success: true, message: 'Proof approved and reward sent!' })
   } catch (err) {
-    res.status(500).json({ error: err.message })
+    console.error('Admin approve error:', err)
+    res.status(500).json({ error: 'Could not approve proof' })
   }
 })
 
-// Reject proof from admin
+// Reject proof from admin (only pending ones)
 router.post('/proofs/reject', async (req, res) => {
   const { completion_id } = req.body
   try {
-    await pool.query(
-      `UPDATE mission_completions 
-       SET status='rejected', reviewed_at=NOW() 
-       WHERE id=$1`,
+    const r = await pool.query(
+      `UPDATE mission_completions
+       SET status='rejected', reviewed_at=NOW()
+       WHERE id=$1 AND status='pending' RETURNING id`,
       [completion_id]
     )
+    if (r.rows.length === 0) {
+      return res.status(400).json({ error: 'Proof not found or already reviewed' })
+    }
     res.json({ success: true, message: 'Proof rejected' })
   } catch (err) {
-    res.status(500).json({ error: err.message })
+    console.error('Admin reject error:', err)
+    res.status(500).json({ error: 'Could not reject proof' })
   }
 })
 
