@@ -7,13 +7,14 @@ const TOKEN_LIFETIME = '30d'
 // Create a pass for a user. Returns null (and logs) if the secret is not set,
 // so login keeps working while the secret is being added.
 function signUserToken(user) {
-  const secret = process.env.JWT_SECRET
+  const secret = process.env.USER_JWT_SECRET
   if (!secret || secret.length < 32) {
-    console.error('JWT_SECRET is missing or too short: login passes are disabled')
+    console.error('USER_JWT_SECRET is missing or too short: login passes are disabled')
     return null
   }
   return jwt.sign({ uid: user.id }, secret, {
     algorithm: 'HS256',
+    issuer: 'zowpay-user',
     expiresIn: TOKEN_LIFETIME
   })
 }
@@ -24,8 +25,9 @@ function readUserId(req) {
   const header = req.headers.authorization || ''
   if (!header.startsWith('Bearer ')) return null
   try {
-    const payload = jwt.verify(header.slice(7), process.env.JWT_SECRET, {
-      algorithms: ['HS256']
+    const payload = jwt.verify(header.slice(7), process.env.USER_JWT_SECRET, {
+      algorithms: ['HS256'],
+      issuer: 'zowpay-user'
     })
     return payload.uid || null
   } catch (err) {
