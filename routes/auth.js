@@ -1,6 +1,7 @@
 const express = require('express')
 const router = express.Router()
 const pool = require('../db')
+const { signUserToken } = require('../middleware/userAuth')
 
 // Send OTP
 router.post('/send-otp', async (req, res) => {
@@ -98,7 +99,10 @@ router.post('/verify-otp', async (req, res) => {
       }
     }
 
-    res.json({ success: true, user: user.rows[0] })
+    // Login pass, valid for 30 days (null if JWT_SECRET is not set yet)
+    const token = signUserToken(user.rows[0])
+
+    res.json({ success: true, user: user.rows[0], token })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
