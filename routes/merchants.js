@@ -1,6 +1,7 @@
 const express = require('express')
 const router = express.Router()
 const pool = require('../db')
+const { onlySelf } = require('../middleware/userAuth')
 require('dotenv').config()
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY
@@ -117,9 +118,34 @@ const processPaidCampaign = async (reference, paidAmount) => {
   return claim.rows[0]
 }
 
+// Only the campaign's own merchant may review its submissions, and nobody can
+// review their own submission.
+const ownerCheck = async (completion_id, userId) => {
+  const found = await pool.query(
+    `SELECT mc.user_id, m.merchant_id
+     FROM mission_completions mc
+     JOIN missions m ON m.id = mc.mission_id
+     WHERE mc.id=$1`,
+    [completion_id]
+  )
+  if (found.rows.length === 0) return { status: 404, error: 'Submission not found' }
+  const row = found.rows[0]
+  if (String(row.merchant_id) !== String(userId)) {
+    return { status: 403, error: 'Only the campaign owner can review this' }
+  }
+  if (String(row.user_id) === String(userId)) {
+    return { status: 403, error: 'You cannot review your own submission' }
+  }
+  return null
+}
+
+// Every route below needs a login pass (set in server.js).
+// The user always comes from the pass, never from the request body.
+
 // Register as merchant
 router.post('/register', async (req, res) => {
-  const { user_id, business_name, business_category } = req.body
+  const { business_name, business_category } = req.body
+  const user_id = req.userId
   try {
     await pool.query(
       `UPDATE users SET
@@ -136,7 +162,7 @@ router.post('/register', async (req, res) => {
 })
 
 // Get merchant profile
-router.get('/profile/:user_id', async (req, res) => {
+router.get('/profile/:user_id', onlySelf('user_id'), async (req, res) => {
   const { user_id } = req.params
   try {
     const result = await pool.query('SELECT * FROM users WHERE id=$1', [user_id])
@@ -180,10 +206,11 @@ router.get('/missions/preview/:budget/:people', (req, res) => {
 // Create a campaign: saves it as pending_payment and returns a Paystack checkout link
 router.post('/missions/create', async (req, res) => {
   const {
-    merchant_id, email, title, description, type,
+    email, title, description, type,
     budget, max_participants, proof_type,
     time_estimate, category
   } = req.body
+  const merchant_id = req.userId
 
   try {
     const merchant = await pool.query(
@@ -278,9 +305,10 @@ router.post('/missions/confirm', async (req, res) => {
   try {
     const { reference } = req.body
     const found = await pool.query(
-      'SELECT id, status FROM missions WHERE payment_reference=$1', [reference]
+      'SELECT id, status, merchant_id FROM missions WHERE payment_reference=$1', [reference]
     )
-    if (found.rows.length === 0) {
+    // You can only confirm your own campaign payment
+    if (found.rows.length === 0 || String(found.rows[0].merchant_id) !== String(req.userId)) {
       return res.status(404).json({ error: 'Campaign not found' })
     }
 
@@ -314,7 +342,7 @@ router.post('/missions/confirm', async (req, res) => {
 })
 
 // Get merchant missions
-router.get('/missions/:merchant_id', async (req, res) => {
+router.get('/missions/:merchant_id', onlySelf('merchant_id'), async (req, res) => {
   const { merchant_id } = req.params
   try {
     const result = await pool.query(
@@ -339,6 +367,10 @@ router.get('/missions/:merchant_id', async (req, res) => {
 router.get('/submissions/:mission_id', async (req, res) => {
   const { mission_id } = req.params
   try {
+    const owner = await pool.query('SELECT merchant_id FROM missions WHERE id=$1', [mission_id])
+    if (owner.rows.length === 0 || String(owner.rows[0].merchant_id) !== String(req.userId)) {
+      return res.status(403).json({ error: 'Not allowed' })
+    }
     const result = await pool.query(
       `SELECT mc.*, u.phone, u.full_name
        FROM mission_completions mc
@@ -357,6 +389,8 @@ router.get('/submissions/:mission_id', async (req, res) => {
 router.post('/submissions/approve', async (req, res) => {
   const { completion_id } = req.body
   try {
+    const denied = await ownerCheck(completion_id, req.userId)
+    if (denied) return res.status(denied.status).json({ error: denied.error })
     const r = await approveCompletion(completion_id)
     if (r.error) return res.status(400).json({ error: r.error })
     res.json({ success: true, message: 'Submission approved and ZowPoints sent!' })
@@ -370,11 +404,13 @@ router.post('/submissions/approve', async (req, res) => {
 router.post('/submissions/reject', async (req, res) => {
   const { completion_id, reason } = req.body
   try {
+    const denied = await ownerCheck(completion_id, req.userId)
+    if (denied) return res.status(denied.status).json({ error: denied.error })
     await pool.query(
       `UPDATE mission_completions
        SET status='rejected', reviewed_at=NOW(), proof_text=proof_text || $1
        WHERE id=$2 AND status='pending'`,
-      [`\n[REJECTED: ${reason}]`, completion_id]
+      [`\n[REJECTED: ${String(reason || '').slice(0, 200)}]`, completion_id]
     )
     res.json({ success: true, message: 'Submission rejected' })
   } catch (err) {
@@ -383,7 +419,7 @@ router.post('/submissions/reject', async (req, res) => {
 })
 
 // Get merchant stats
-router.get('/stats/:merchant_id', async (req, res) => {
+router.get('/stats/:merchant_id', onlySelf('merchant_id'), async (req, res) => {
   const { merchant_id } = req.params
   try {
     const missions = await pool.query(

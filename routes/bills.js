@@ -1,6 +1,7 @@
 const express = require('express')
 const router = express.Router()
 const pool = require('../db')
+const { requireUser } = require('../middleware/userAuth')
 require('dotenv').config()
 
 const VTPASS_BASE_URL = process.env.VTPASS_BASE_URL
@@ -435,10 +436,12 @@ router.get('/fee/:type/:amount', (req, res) => {
 })
 
 // Start a bill payment: creates the order and a Paystack checkout link.
-// Body: { user_id, email, type, amount, ...fields for that bill type }
-router.post('/checkout', async (req, res) => {
+// Body: { email, type, amount, ...fields for that bill type }
+// The user comes from the login pass, never from the request body.
+router.post('/checkout', requireUser, async (req, res) => {
   try {
-    const { user_id, email, type, ...details } = req.body
+    const { user_id: ignoredUserId, email, type, ...details } = req.body
+    const user_id = req.userId
     const builder = BUILDERS[type]
     if (!user_id || !builder) {
       return res.status(400).json({ error: 'Invalid request' })
@@ -535,11 +538,14 @@ router.post('/checkout', async (req, res) => {
 })
 
 // App calls this after Paystack sends the customer back (backup for the webhook).
-router.post('/confirm', async (req, res) => {
+router.post('/confirm', requireUser, async (req, res) => {
   try {
     const { reference } = req.body
     const order = await getOrder(reference)
-    if (!order) return res.status(404).json({ error: 'Order not found' })
+    // You can only see and confirm your own orders
+    if (!order || String(order.user_id) !== String(req.userId)) {
+      return res.status(404).json({ error: 'Order not found' })
+    }
 
     if (order.status === 'pending') {
       const response = await fetch(
@@ -560,10 +566,12 @@ router.post('/confirm', async (req, res) => {
 })
 
 // App polls this while status is pending / processing.
-router.get('/order/:reference', async (req, res) => {
+router.get('/order/:reference', requireUser, async (req, res) => {
   try {
     const order = await getOrder(req.params.reference)
-    if (!order) return res.status(404).json({ error: 'Order not found' })
+    if (!order || String(order.user_id) !== String(req.userId)) {
+      return res.status(404).json({ error: 'Order not found' })
+    }
     res.json(publicOrder(order))
   } catch (err) {
     res.status(500).json({ error: 'Could not load order' })

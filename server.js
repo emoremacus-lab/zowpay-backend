@@ -132,7 +132,7 @@ app.use('/api/missions', requireUser, missionsRoutes)
 
 // Merchants
 const merchantsRoutes = require('./routes/merchants')
-app.use('/api/merchants', merchantsRoutes)
+app.use('/api/merchants', requireUser, merchantsRoutes)
 
 // Rewards
 const rewardsRoutes = require('./routes/rewards')
