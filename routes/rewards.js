@@ -1,6 +1,7 @@
 const express = require('express')
 const router = express.Router()
 const pool = require('../db')
+const { onlySelf } = require('../middleware/userAuth')
 require('dotenv').config()
 
 const VTPASS_BASE_URL = process.env.VTPASS_BASE_URL
@@ -65,7 +66,9 @@ router.get('/catalog', (req, res) => {
 // 2. send the airtime through VTPass,
 // 3. if VTPass clearly fails, give the points back.
 router.post('/redeem', async (req, res) => {
-  const { user_id, reward_id, phone, network } = req.body
+  // The user comes from the login pass, never from the request body
+  const { reward_id, phone, network } = req.body
+  const user_id = req.userId
 
   const reward = REWARDS[reward_id]
   if (!reward) {
@@ -204,7 +207,7 @@ router.post('/redeem', async (req, res) => {
 })
 
 // Get redemption history
-router.get('/history/:user_id', async (req, res) => {
+router.get('/history/:user_id', onlySelf('user_id'), async (req, res) => {
   const { user_id } = req.params
   try {
     const result = await pool.query(

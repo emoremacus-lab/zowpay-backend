@@ -55,4 +55,15 @@ function requireUser(req, res, next) {
   next()
 }
 
-module.exports = { signUserToken, optionalUser, requireUser }
+// For routes like /something/:user_id: the id in the address must be the
+// signed-in user's own id. Use after requireUser.
+function onlySelf(paramName) {
+  return (req, res, next) => {
+    if (String(req.params[paramName]) !== String(req.userId)) {
+      return res.status(403).json({ error: 'Not allowed' })
+    }
+    next()
+  }
+}
+
+module.exports = { signUserToken, optionalUser, requireUser, onlySelf }

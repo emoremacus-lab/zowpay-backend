@@ -1,9 +1,11 @@
 const express = require('express')
 const router = express.Router()
 const pool = require('../db')
+const { onlySelf } = require('../middleware/userAuth')
 
 // ZowPoints balance. No cash balance is held — Zowpay does not store customer money.
-router.get('/balance/:user_id', async (req, res) => {
+// Every route here needs a login pass (set in server.js) and only shows your own data.
+router.get('/balance/:user_id', onlySelf('user_id'), async (req, res) => {
   const { user_id } = req.params
   try {
     const result = await pool.query(
@@ -20,7 +22,7 @@ router.get('/balance/:user_id', async (req, res) => {
 })
 
 // Purchase and rewards history
-router.get('/transactions/:user_id', async (req, res) => {
+router.get('/transactions/:user_id', onlySelf('user_id'), async (req, res) => {
   const { user_id } = req.params
   try {
     const result = await pool.query(

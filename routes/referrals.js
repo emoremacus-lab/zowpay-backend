@@ -1,6 +1,7 @@
 const express = require('express')
 const router = express.Router()
 const pool = require('../db')
+const { onlySelf } = require('../middleware/userAuth')
 
 // Generate unique referral code
 const generateCode = (phone) => {
@@ -10,7 +11,7 @@ const generateCode = (phone) => {
 }
 
 // Get or create referral code for user
-router.get('/code/:user_id', async (req, res) => {
+router.get('/code/:user_id', onlySelf('user_id'), async (req, res) => {
   const { user_id } = req.params
   try {
     // Check if user already has a referral code
@@ -84,7 +85,9 @@ router.get('/code/:user_id', async (req, res) => {
 
 // Apply referral code on signup
 router.post('/apply', async (req, res) => {
-  const { user_id, referral_code } = req.body
+  // The user comes from the login pass, never from the request body
+  const { referral_code } = req.body
+  const user_id = req.userId
   try {
     // Find referrer
     const referrer = await pool.query(
@@ -128,82 +131,16 @@ router.post('/apply', async (req, res) => {
 
     res.json({
       success: true,
-      message: 'Referral code applied! Both you and your referrer will earn 500 ZowPoints when you fund your wallet.'
+      message: 'Referral code applied! Both you and your referrer will earn 500 ZowPoints when you make your first bill payment of ₦500 or more.'
     })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
 })
 
-// Complete referral when new user funds wallet
-router.post('/complete', async (req, res) => {
-  const { user_id } = req.body
-  try {
-    // Find pending referral for this user
-    const referral = await pool.query(
-      `SELECT * FROM referrals 
-       WHERE referred_id=$1 AND status='pending'`,
-      [user_id]
-    )
-
-    if (referral.rows.length === 0) {
-      return res.json({ success: true, message: 'No pending referral' })
-    }
-
-    const ref = referral.rows[0]
-    const pointsEach = 500
-
-    // Award points to referrer
-    await pool.query(
-      'UPDATE wallets SET zowpoints = zowpoints + $1 WHERE user_id=$2',
-      [pointsEach, ref.referrer_id]
-    )
-
-    // Award points to new user
-    await pool.query(
-      'UPDATE wallets SET zowpoints = zowpoints + $1 WHERE user_id=$2',
-      [pointsEach, user_id]
-    )
-
-    // Record transactions for both
-    await pool.query(
-      `INSERT INTO transactions 
-       (user_id, type, amount, description, reference, status, zowpoints_earned)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [
-        ref.referrer_id, 'reward', 0,
-        'Referral bonus — friend joined Zowpay!',
-        'REF-BONUS-' + Date.now(), 'success', pointsEach
-      ]
-    )
-
-    await pool.query(
-      `INSERT INTO transactions 
-       (user_id, type, amount, description, reference, status, zowpoints_earned)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [
-        user_id, 'reward', 0,
-        'Welcome bonus — referral code applied!',
-        'REF-WELCOME-' + Date.now(), 'success', pointsEach
-      ]
-    )
-
-    // Mark referral as completed
-    await pool.query(
-      `UPDATE referrals 
-       SET status='completed', points_awarded=$1 
-       WHERE id=$2`,
-      [pointsEach, ref.id]
-    )
-
-    res.json({
-      success: true,
-      message: 'Referral completed! 500 ZowPoints awarded to both users!'
-    })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
-})
+// Referral bonuses are paid by the bill-payment code (completeReferral in bills.js)
+// after the referred person's first qualifying bill. There is deliberately no public
+// route that awards them.
 
 // Get referral leaderboard
 router.get('/leaderboard', async (req, res) => {
@@ -219,7 +156,12 @@ router.get('/leaderboard', async (req, res) => {
        ORDER BY total_referrals DESC
        LIMIT 10`
     )
-    res.json({ success: true, leaderboard: result.rows })
+    // Hide most of each phone number: this list is visible to every signed-in user
+    const leaderboard = result.rows.map(row => ({
+      ...row,
+      phone: row.phone ? '***' + String(row.phone).slice(-4) : null
+    }))
+    res.json({ success: true, leaderboard })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

@@ -3,6 +3,7 @@ const cors = require('cors')
 const helmet = require('helmet')
 const rateLimit = require('express-rate-limit')
 require('dotenv').config()
+const { requireUser } = require('./middleware/userAuth')
 
 const app = express()
 app.set('trust proxy', 1)
@@ -113,7 +114,7 @@ app.use('/api/auth', authRoutes)
 
 // Wallet
 const walletRoutes = require('./routes/wallet')
-app.use('/api/wallet', walletRoutes)
+app.use('/api/wallet', requireUser, walletRoutes)
 
 // Paystack — payment rate limited
 const paystackRoutes = require('./routes/paystack')
@@ -127,7 +128,7 @@ app.use('/api/bills', billsRoutes)
 
 // Missions
 const missionsRoutes = require('./routes/missions')
-app.use('/api/missions', missionsRoutes)
+app.use('/api/missions', requireUser, missionsRoutes)
 
 // Merchants
 const merchantsRoutes = require('./routes/merchants')
@@ -135,11 +136,11 @@ app.use('/api/merchants', merchantsRoutes)
 
 // Rewards
 const rewardsRoutes = require('./routes/rewards')
-app.use('/api/rewards', rewardsRoutes)
+app.use('/api/rewards', requireUser, rewardsRoutes)
 
 // Referrals
 const referralsRoutes = require('./routes/referrals')
-app.use('/api/referrals', referralsRoutes)
+app.use('/api/referrals', requireUser, referralsRoutes)
 
 // Admin — stricter limiter
 const adminRoutes = require('./routes/admin')

@@ -3,6 +3,7 @@ const router = express.Router()
 const pool = require('../db')
 const multer = require('multer')
 const { approveCompletion } = require('./merchants')
+const { onlySelf } = require('../middleware/userAuth')
 
 // Multer setup — store in memory, max 5MB
 const upload = multer({
@@ -66,7 +67,9 @@ router.get('/category/:cat', async (req, res) => {
 
 // Submit mission proof — fixed to handle FormData + file upload
 router.post('/submit', upload.single('proof_file'), async (req, res) => {
-  const { mission_id, user_id, proof_text } = req.body
+  // The user comes from the login pass, never from the request body
+  const { mission_id, proof_text } = req.body
+  const user_id = req.userId
   try {
     if (!mission_id || !user_id) {
       return res.status(400).json({ error: 'Missing required fields' })
@@ -90,6 +93,9 @@ router.post('/submit', upload.single('proof_file'), async (req, res) => {
     if (mission.rows.length === 0) {
       return res.status(404).json({ error: 'Mission not found' })
     }
+    if (String(mission.rows[0].merchant_id) === String(user_id)) {
+      return res.status(400).json({ error: 'You cannot complete your own campaign' })
+    }
     if (mission.rows[0].status !== 'active') {
       return res.status(400).json({ error: 'This campaign is not open' })
     }
@@ -106,6 +112,10 @@ router.post('/submit', upload.single('proof_file'), async (req, res) => {
     // Handle file if uploaded — convert to base64
     let proof_url = null
     if (req.file) {
+      // Only pictures are accepted as proof
+      if (!req.file.mimetype.startsWith('image/') || req.file.mimetype.includes('svg')) {
+        return res.status(400).json({ error: 'Please upload a photo or screenshot' })
+      }
       const base64 = req.file.buffer.toString('base64')
       const mimeType = req.file.mimetype
       proof_url = `data:${mimeType};base64,${base64}`
@@ -138,7 +148,7 @@ router.post('/submit', upload.single('proof_file'), async (req, res) => {
 })
 
 // Check if user already submitted for a mission
-router.get('/check/:mission_id/:user_id', async (req, res) => {
+router.get('/check/:mission_id/:user_id', onlySelf('user_id'), async (req, res) => {
   const { mission_id, user_id } = req.params
   try {
     const result = await pool.query(
@@ -157,7 +167,7 @@ router.get('/check/:mission_id/:user_id', async (req, res) => {
 })
 
 // Get user's mission submissions
-router.get('/user/:user_id', async (req, res) => {
+router.get('/user/:user_id', onlySelf('user_id'), async (req, res) => {
   const { user_id } = req.params
   try {
     const result = await pool.query(
@@ -175,10 +185,33 @@ router.get('/user/:user_id', async (req, res) => {
   }
 })
 
+// Only the merchant who owns the campaign may review its proofs, and nobody
+// can review their own submission.
+const ownerCheck = async (completion_id, userId) => {
+  const found = await pool.query(
+    `SELECT mc.user_id, m.merchant_id
+     FROM mission_completions mc
+     JOIN missions m ON m.id = mc.mission_id
+     WHERE mc.id=$1`,
+    [completion_id]
+  )
+  if (found.rows.length === 0) return { status: 404, error: 'Submission not found' }
+  const row = found.rows[0]
+  if (String(row.merchant_id) !== String(userId)) {
+    return { status: 403, error: 'Only the campaign owner can review this' }
+  }
+  if (String(row.user_id) === String(userId)) {
+    return { status: 403, error: 'You cannot review your own submission' }
+  }
+  return null
+}
+
 // Approve mission completion — same safe logic as the merchant route
 router.post('/approve', async (req, res) => {
   const { completion_id } = req.body
   try {
+    const denied = await ownerCheck(completion_id, req.userId)
+    if (denied) return res.status(denied.status).json({ error: denied.error })
     const r = await approveCompletion(completion_id)
     if (r.error) return res.status(400).json({ error: r.error })
     res.json({ success: true, message: 'Mission approved and ZowPoints sent!' })
@@ -192,6 +225,8 @@ router.post('/approve', async (req, res) => {
 router.post('/reject', async (req, res) => {
   const { completion_id } = req.body
   try {
+    const denied = await ownerCheck(completion_id, req.userId)
+    if (denied) return res.status(denied.status).json({ error: denied.error })
     await pool.query(
       `UPDATE mission_completions
        SET status='rejected', reviewed_at=NOW()
@@ -204,70 +239,7 @@ router.post('/reject', async (req, res) => {
   }
 })
 
-// Seed test missions
-router.post('/seed', async (req, res) => {
-  try {
-    const missions = [
-      {
-        title: 'Follow Zowpay on Twitter',
-        description: 'Follow our official Twitter account @ZowpayNG and like our pinned tweet',
-        category: 'Social',
-        reward_points: 100,
-        reward_cash: 0,
-        max_participants: 1000,
-        budget: 0,
-        proof_instructions: 'Take a screenshot showing you followed @ZowpayNG',
-        time_estimate: '2 mins',
-        merchant_id: null
-      },
-      {
-        title: 'Share Zowpay on WhatsApp',
-        description: 'Share the Zowpay app link on your WhatsApp status for 24 hours',
-        category: 'Social',
-        reward_points: 200,
-        reward_cash: 0,
-        max_participants: 500,
-        budget: 250000,
-        proof_instructions: 'Screenshot your WhatsApp status showing the Zowpay post',
-        time_estimate: '5 mins',
-        merchant_id: null
-      },
-      {
-        title: 'Rate Zowpay on Play Store',
-        description: 'Give Zowpay a 5-star rating and write a short review on Google Play Store',
-        category: 'Review',
-        reward_points: 300,
-        reward_cash: 0,
-        max_participants: 200,
-        budget: 0,
-        proof_instructions: 'Screenshot your Play Store review',
-        time_estimate: '3 mins',
-        merchant_id: null
-      },
-    ]
-
-    for (const mission of missions) {
-      await pool.query(
-        `INSERT INTO missions
-         (title, description, category, reward_points, reward_cash,
-          max_participants, current_participants, budget, status,
-          proof_instructions, time_estimate, merchant_id)
-         VALUES ($1,$2,$3,$4,$5,$6,0,$7,'active',$8,$9,$10)
-         ON CONFLICT DO NOTHING`,
-        [
-          mission.title, mission.description, mission.category,
-          mission.reward_points, mission.reward_cash,
-          mission.max_participants, mission.budget,
-          mission.proof_instructions, mission.time_estimate,
-          mission.merchant_id
-        ]
-      )
-    }
-
-    res.json({ success: true, message: 'Missions seeded!' })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
-})
+// (The old test-data "seed" route was removed: it let anyone create campaigns
+// that no merchant had paid for.)
 
 module.exports = router
