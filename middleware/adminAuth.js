@@ -5,8 +5,13 @@ const crypto = require('crypto')
 const rateLimit = require('express-rate-limit')
 const pool = require('../db')
 
-const ADMIN_SECRET = process.env.ADMIN_JWT_SECRET || process.env.JWT_SECRET
+// Admin has its own secret. It is NOT shared with customer login passes.
+const ADMIN_SECRET = process.env.ADMIN_JWT_SECRET
 const TOKEN_TTL = '8h'
+const secretOk = () => !!ADMIN_SECRET && ADMIN_SECRET.length >= 32
+if (!secretOk()) {
+  console.error('ADMIN_JWT_SECRET is missing or too short: admin login is disabled')
+}
 
 // Create the audit table once (safe to run on every start)
 const ensureAuditTable = async () => {
@@ -43,8 +48,8 @@ const safeEqual = (a, b) => {
 
 const adminLogin = (req, res) => {
   const expected = process.env.ADMIN_PASSWORD
-  if (!expected || !ADMIN_SECRET) {
-    console.error('ADMIN_PASSWORD or JWT secret is not set')
+  if (!expected || !secretOk()) {
+    console.error('ADMIN_PASSWORD or ADMIN_JWT_SECRET is not set')
     return res.status(500).json({ success: false, error: 'Admin login is not configured' })
   }
   const { password } = req.body || {}
@@ -55,7 +60,11 @@ const adminLogin = (req, res) => {
     ).catch(() => {})
     return res.status(401).json({ success: false, error: 'Incorrect password' })
   }
-  const token = jwt.sign({ role: 'admin' }, ADMIN_SECRET, { expiresIn: TOKEN_TTL })
+  const token = jwt.sign({ role: 'admin' }, ADMIN_SECRET, {
+    algorithm: 'HS256',
+    issuer: 'zowpay-admin',
+    expiresIn: TOKEN_TTL
+  })
   pool.query(
     'INSERT INTO admin_audit_log (method, path, details, ip) VALUES ($1,$2,$3,$4)',
     ['POST', '/login', JSON.stringify({ result: 'success' }), req.ip]
@@ -68,7 +77,10 @@ const requireAdmin = (req, res, next) => {
   const token = header.startsWith('Bearer ') ? header.slice(7) : null
   if (!token) return res.status(401).json({ success: false, error: 'Admin login required' })
   try {
-    const payload = jwt.verify(token, ADMIN_SECRET)
+    const payload = jwt.verify(token, ADMIN_SECRET, {
+      algorithms: ['HS256'],
+      issuer: 'zowpay-admin'
+    })
     if (payload.role !== 'admin') throw new Error('not admin')
     req.admin = payload
     next()
